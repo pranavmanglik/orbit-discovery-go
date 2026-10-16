@@ -237,7 +237,7 @@ const file_orbit_discovery_v1_service_discovery_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012f\n" +
 	"\x10ServiceDiscovery\x12R\n" +
-	"\aResolve\x12\".orbit.discovery.v1.ResolveRequest\x1a#.orbit.discovery.v1.ResolveResponseB<Z:github.com/orbit-projects/orbit-discovery-go/v1;discoveryv1b\x06proto3"
+	"\aResolve\x12\".orbit.discovery.v1.ResolveRequest\x1a#.orbit.discovery.v1.ResolveResponseB=Z;github.com/orbit-projects/orbit-discovery-go/v1;discoveryv1b\x06proto3"
 
 var (
 	file_orbit_discovery_v1_service_discovery_proto_rawDescOnce sync.Once

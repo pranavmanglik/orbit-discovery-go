@@ -1,61 +1,54 @@
-# Orbit Discovery Go Contract Library: operations and security
+# Orbit Discovery Go: operations
 
-This guide organizes runtime behavior documented by the package. It does not certify production readiness. Verify provider/client versions, permissions, transport security, limits, and failure behavior in the target environment before release.
+`orbit-discovery-go` supplies generated Protobuf types plus a validating gRPC client/server wrapper.
+It does not start a server, create a connection, load credentials, or select TLS settings. The
+application owns those resources and passes an existing `grpc.ServiceRegistrar` to `Register` or
+an existing `grpc.ClientConnInterface` to `NewClient`.
 
-## Configuration surface
+## Server integration
 
-Environment names found in the package README:
+1. Create the gRPC server with the application's TLS, authentication, authorization, receive-size,
+   concurrency, and observability policy.
+2. Implement `discovery.Resolver`; honor the supplied context, return promptly on cancellation,
+   and avoid provider error messages that contain credentials or personal data.
+3. Register it with `discovery.Register(server, resolver)` and serve using the host application's
+   lifecycle manager.
+4. Stop accepting traffic and gracefully drain the gRPC server before closing resolver-owned
+   provider clients.
 
-The package README does not name `ORBIT_*` variables. Use its typed constructors and application configuration, and confirm exact runtime inputs in the implementation before deployment.
+`Register` rejects nil registrars and resolvers. The handler validates service identifiers and
+every returned endpoint, enforces fan-out and encoded response limits, checks duplicate instance
+IDs, and maps provider errors to generic statuses. Configure `grpc.MaxRecvMsgSize` and server
+concurrency limits on the host server: the registration helper receives an already-created server
+and cannot change its transport options.
 
-Use the package README's constructor and deployment examples. Store credentials in a secret manager and avoid logging credentials, raw provider errors, request data, or opaque cursors.
+## Client integration
 
-## Lifecycle, failure behavior, and limits
+Create a `grpc.ClientConn` with TLS and the application's workload credentials, then pass it to
+`discovery.NewClient`. Reuse the connection according to gRPC's lifecycle guidance and let the
+application own its shutdown. Call `Resolve` with a bounded deadline and a context that can be
+cancelled when the request no longer needs the result. `Resolve` sets a per-call maximum receive
+size of 1 MiB, so oversized protobuf messages are rejected by gRPC before the response is decoded.
+The client does not own or close the connection and does not cache service results.
 
-`orbit-discovery-go` contains the generated Go bindings and bounded client/server helpers for the
-provider-neutral `orbit.discovery.v1.ServiceDiscovery` contract. It helps a Go implementation
-conform to the same capability API used by Python `orbit-discovery`; it is not itself a concrete
-service-discovery provider. For example, `orbit-kubernetes-go` uses this contract library and
-implements Kubernetes EndpointSlice discovery in Go. Concrete providers own their vendor SDKs,
-credentials, configuration, transport, lifecycle, and provider failures.
+Validate endpoint egress policy at the point of use. DNS lookup and connection belong to the
+consumer; this SDK only validates and normalizes the address syntax.
 
-The versioned Protobuf schema is mirrored from `orbit-discovery/proto/orbit_discovery/v1`. The
-Python capability package owns the contract definition; keep this copy and generated bindings in
-sync when that contract changes. Generated types, client, server interface, and registration helpers
-are public under `github.com/orbit-projects/orbit-discovery-go/v1`.
+## Contract limits
 
-```go
-import (
-	"context"
+- Service and instance identifiers: 128 ASCII bytes maximum.
+- Hostnames: 253 bytes maximum; IP literals are canonicalized and DNS names use IDNA lookup rules.
+- Port: 1–65,535; scheme: `http` or `https`; weight: 1–1,000.
+- Metadata: at most 16 keys, 64-byte keys, 256 Unicode scalars per value, and 4 KiB total per
+  instance.
+- Fan-out: at most 4,096 instances; serialized response: at most 1 MiB.
 
-	"github.com/orbit-projects/orbit-discovery-go/discovery"
-	"google.golang.org/grpc"
-)
+These are contract-level bounds, not a substitute for host-level gRPC message, concurrency, and
+deadline settings.
 
-type catalogResolver struct{}
+## Verification limits
 
-func (catalogResolver) Resolve(_ context.Context, service string) ([]discovery.Instance, error) {
-	if service != "catalog" {
-		return nil, nil
-	}
-	return []discovery.Instance{{
-		Service: "catalog", InstanceID: "catalog-1", Host: "127.0.0.1",
-		Port: 8081, Scheme: "http", Weight: 1,
-	}}, nil
-}
-
-func register(server *grpc.Server) error {
-	return discovery.Register(server, catalogResolver{})
-}
-```
-
-`discovery.Register` validates requests and provider results against the language-neutral bounded
-contract, returns sanitized gRPC errors, and honors context cancellation. `discovery.NewClient`
-offers the matching Go client API. The package limits each result to 4,096 endpoints and each wire
-message to 1 MiB, and bounds endpoint identifiers, host syntax, ports, weights, and metadata. The
-SDK validates endpoint syntax; callers still need egress policy to prevent SSRF when connecting to
-resolved hosts.
-
-## Production validation
-
-Validate startup/shutdown cleanup, timeout and cancellation behavior, concurrency and payload bounds where applicable, secret rotation and least-privilege access, data durability, backup/restore, and failover against the selected provider. Do not infer distributed or durable guarantees from an in-process API or fake-client tests.
+Run `make test`, `make vet`, and `make build` for local validation. Tests use `bufconn`; they do not
+exercise production TLS, identity, service-mesh policy, real registry availability, DNS/egress
+policy, or cross-language release compatibility. Keep the Protobuf copy synchronized with the
+Python capability contract and confirm generated bindings in the release workflow.

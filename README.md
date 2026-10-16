@@ -44,6 +44,39 @@ message to 1 MiB, and bounds endpoint identifiers, host syntax, ports, weights, 
 SDK validates endpoint syntax; callers still need egress policy to prevent SSRF when connecting to
 resolved hosts.
 
+The SDK also includes `WeightedPicker` for request-local endpoint selection. It uses smooth weighted
+round robin without network calls, snapshots and validates each update, returns detached endpoint
+metadata, and reports `ErrNoInstances` when a refreshed service has no
+ready endpoints. Refresh the snapshot from `Client.Resolve` according to the application's freshness
+policy; the picker does not cache, probe, or declare endpoints healthy.
+
+```go
+import (
+    "errors"
+
+    "github.com/orbit-projects/orbit-discovery-go/discovery"
+)
+
+instances, err := client.Resolve(ctx, "catalog")
+if err != nil {
+    return err
+}
+picker, err := discovery.NewWeightedPicker("catalog", instances)
+if err != nil {
+    return err
+}
+backend, err := picker.Pick()
+if errors.Is(err, discovery.ErrNoInstances) {
+    // Return the application's service-unavailable response.
+} else if err != nil {
+    return err
+}
+_ = backend // Use the endpoint with the application's connection pool.
+```
+
+Call `picker.Update` after refreshing the discovery snapshot. The application still owns connection
+pools, health checks, retry safety, and stale-endpoint behavior.
+
 ## Documentation
 
 The package-specific guides cover [architecture](docs/architecture/overview.md), [operations and security](docs/operations/README.md), and [development](docs/development/README.md), with [security guidance](docs/security/overview.md). The [documentation index](docs/README.md) links to the full package overview and project policies.
@@ -62,7 +95,7 @@ make build
 ```
 
 Tests use an in-memory gRPC transport. They do not verify a live registry, a Kubernetes cluster,
-Python Core process hosting, or release provenance. This package is pre-alpha and is not a
+Python Core process hosting, or release provenance. This package is in alpha and is not a
 production certification.
 
 Licensed under Apache-2.0.

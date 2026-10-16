@@ -34,6 +34,17 @@ import (
 
 type resolverFunc func(context.Context, string) ([]discovery.Instance, error)
 
+type oversizedResponseServer struct {
+	discoveryv1.UnimplementedServiceDiscoveryServer
+}
+
+func (oversizedResponseServer) Resolve(context.Context, *discoveryv1.ResolveRequest) (*discoveryv1.ResolveResponse, error) {
+	return &discoveryv1.ResolveResponse{Instances: []*discoveryv1.ServiceInstance{{
+		Service: "catalog", InstanceId: "catalog-1", Host: "127.0.0.1", Port: 8081,
+		Scheme: "http", Weight: 1, Metadata: map[string]string{"payload": strings.Repeat("x", 2*discovery.MaxWireMessageBytes)},
+	}}}, nil
+}
+
 func (f resolverFunc) Resolve(ctx context.Context, service string) ([]discovery.Instance, error) {
 	return f(ctx, service)
 }
@@ -146,10 +157,42 @@ func TestResponseFanoutAndWireSizeAreBounded(t *testing.T) {
 	}
 }
 
+func TestClientRejectsOversizedWireMessageBeforeDecoding(t *testing.T) {
+	listener := bufconn.Listen(4 << 20)
+	server := grpc.NewServer()
+	server.RegisterService(&discoveryv1.ServiceDiscovery_ServiceDesc, oversizedResponseServer{})
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = listener.Close()
+	})
+	connection, err := grpc.NewClient("passthrough:///orbit-discovery-oversized",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return listener.Dial()
+		}), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	client, err := discovery.NewClient(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Resolve(context.Background(), "catalog")
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("oversized response should be rejected by the gRPC receive bound: %v", err)
+	}
+}
+
 func TestInvalidClientInputIsRejectedLocally(t *testing.T) {
 	client, err := discovery.NewClient(nil)
 	if err == nil || client != nil {
 		t.Fatal("nil connection must be rejected")
+	}
+	var typedNilConnection *grpc.ClientConn
+	client, err = discovery.NewClient(typedNilConnection)
+	if err == nil || client != nil {
+		t.Fatal("typed nil connection must be rejected")
 	}
 
 	client = testClient(t, resolverFunc(func(context.Context, string) ([]discovery.Instance, error) {
@@ -158,6 +201,23 @@ func TestInvalidClientInputIsRejectedLocally(t *testing.T) {
 	_, err = client.Resolve(context.Background(), "invalid/name")
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("invalid service name should fail locally: %v", err)
+	}
+	_, err = client.Resolve(context.Background(), strings.Repeat("a", 1<<20))
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("oversized service name should fail locally: %v", err)
+	}
+}
+
+func TestProviderMetadataIsRejectedBeforeOversizedWireResponse(t *testing.T) {
+	client := testClient(t, resolverFunc(func(_ context.Context, name string) ([]discovery.Instance, error) {
+		return []discovery.Instance{{Service: name, InstanceID: "catalog-1", Host: "127.0.0.1",
+			Port: 8081, Scheme: "http", Weight: 1,
+			Metadata: map[string]string{"unbounded": strings.Repeat("x", 1<<20)}}}, nil
+	}))
+
+	_, err := client.Resolve(context.Background(), "catalog")
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("oversized provider metadata should fail closed: %v", err)
 	}
 }
 

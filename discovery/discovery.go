@@ -72,6 +72,8 @@ type grpcServer struct {
 }
 
 // Register validates the resolver and registers the Orbit gRPC service on server.
+// The host application owns server TLS, authentication, authorization, interceptors, and server
+// lifecycle.
 func Register(server grpc.ServiceRegistrar, resolver Resolver) error {
 	if isNil(server) {
 		return fmt.Errorf("gRPC service registrar is required")
@@ -84,8 +86,9 @@ func Register(server grpc.ServiceRegistrar, resolver Resolver) error {
 }
 
 // NewClient creates a typed client over an existing gRPC connection.
+// The caller owns connection configuration and must close it when the application exits.
 func NewClient(connection grpc.ClientConnInterface) (*Client, error) {
-	if connection == nil {
+	if isNil(connection) {
 		return nil, fmt.Errorf("gRPC client connection is required")
 	}
 	return &Client{client: discoveryv1.NewServiceDiscoveryClient(connection)}, nil
@@ -96,18 +99,23 @@ type Client struct {
 	client discoveryv1.ServiceDiscoveryClient
 }
 
-// Resolve returns a validated endpoint snapshot for service.
+// Resolve returns a validated, detached endpoint snapshot for service.
+// It rejects malformed service names locally and honors ctx cancellation and deadlines.
 func (c *Client) Resolve(ctx context.Context, service string) ([]Instance, error) {
 	if c == nil || c.client == nil {
 		return nil, fmt.Errorf("service-discovery client is not initialized")
 	}
-	if ctx == nil {
+	if isNil(ctx) {
 		return nil, fmt.Errorf("request context is required")
 	}
 	if err := validateIdentifier(service); err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid service identifier")
 	}
-	response, err := c.client.Resolve(ctx, &discoveryv1.ResolveRequest{Service: service})
+	response, err := c.client.Resolve(
+		ctx,
+		&discoveryv1.ResolveRequest{Service: service},
+		grpc.MaxCallRecvMsgSize(MaxWireMessageBytes),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +129,7 @@ func (c *Client) Resolve(ctx context.Context, service string) ([]Instance, error
 	return instances, nil
 }
 
+// Resolve implements the generated service and sanitizes provider failures before returning them.
 func (s *grpcServer) Resolve(ctx context.Context, request *discoveryv1.ResolveRequest) (*discoveryv1.ResolveResponse, error) {
 	if request == nil || validateIdentifier(request.GetService()) != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid service identifier")
@@ -208,6 +217,15 @@ func validateInstance(value Instance, service string) error {
 	}
 	metadataBytes := 0
 	for key, item := range value.Metadata {
+		// Check byte limits before regex and UTF-8 scans. Provider data can be unexpectedly large;
+		// bounded scans keep validation cost proportional to the public metadata contract.
+		if len(key) > 64 || len(item) > maxMetadataText*utf8.UTFMax {
+			return fmt.Errorf("metadata size limit exceeded")
+		}
+		metadataBytes += len(key) + len(item)
+		if metadataBytes > maxMetadataSize {
+			return fmt.Errorf("metadata size limit exceeded")
+		}
 		if !metadataPattern.MatchString(key) || !utf8.ValidString(item) || utf8.RuneCountInString(item) > maxMetadataText {
 			return fmt.Errorf("invalid metadata")
 		}
@@ -216,16 +234,12 @@ func validateInstance(value Instance, service string) error {
 				return fmt.Errorf("invalid metadata")
 			}
 		}
-		metadataBytes += len(key) + len(item)
-		if metadataBytes > maxMetadataSize {
-			return fmt.Errorf("metadata size limit exceeded")
-		}
 	}
 	return nil
 }
 
 func validateIdentifier(value string) error {
-	if !identifierPattern.MatchString(value) {
+	if len(value) > 128 || !identifierPattern.MatchString(value) {
 		return fmt.Errorf("invalid service identifier")
 	}
 	return nil

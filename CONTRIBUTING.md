@@ -1,6 +1,6 @@
 # Contributing
 
-Orbit Discovery Go is an Apache-2.0 licensed, pre-alpha SDK. Contributions should preserve the
+Orbit Discovery Go is an Apache-2.0 licensed SDK in alpha review. Contributions should preserve the
 versioned Protobuf service and the limits documented in the root README. Changes to request/response
 semantics must be coordinated with the `orbit-discovery` capability repository and its Python
 bindings.

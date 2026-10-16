@@ -1,17 +1,40 @@
-# Orbit Discovery Go Contract Library: security
+# Orbit Discovery Go: security
 
-## Package-specific security guidance
+The Go package validates a provider-neutral endpoint contract. It is a gRPC contract library, not
+a complete service-discovery deployment: it does not configure TLS, authenticate callers, authorize
+service lookups, or impose network egress policy.
 
-The README does not define separate package-specific security guarantees. Follow the implemented API and provider documentation; do not infer security properties that are not documented and tested.
+## Protect the gRPC boundary
 
-## Credentials and sensitive data
+Use authenticated, encrypted gRPC connections between trusted workloads. Configure TLS and
+appropriate workload identity on the `grpc.Server` and `grpc.ClientConn` supplied by the host
+application. Do not expose the registered service publicly without authentication, authorization,
+and network policy. The test suite uses an in-memory connection with insecure credentials; that is
+test transport only.
 
-Use least-privilege credentials and a secret manager for provider secrets. Do not commit secrets, tokens, private keys, personal data, request bodies, raw provider errors, or opaque cursors. Enable TLS certificate verification for remote services unless package documentation gives a narrowly scoped local-development exception.
+Limit which callers may resolve which service names. A valid response can reveal internal DNS
+names, IP addresses, ports, zones, and metadata. The SDK sanitizes resolver failures and rejects
+invalid or oversized responses, but it does not redact data returned by a successful lookup.
 
-## Vulnerability disclosure
+## Treat resolved endpoints as untrusted routing input
 
-Follow the repository [security policy](../../SECURITY.md). Do not post vulnerability details in public issues. The policy describes private reporting alternatives without claiming that a hosting-platform setting is enabled.
+The SDK checks hostname syntax and canonicalizes IP literals and IDNA names. Syntax validation is
+not an egress control. Before connecting to a resolved address, applications must enforce their
+own destination policy to prevent access to metadata services, loopback, link-local, or otherwise
+forbidden networks. Re-check policy after DNS resolution and on connection, since DNS answers can
+change between validation and use.
 
-## Limits
+Resolver implementations should return only authorized, healthy endpoints and bounded metadata.
+Do not place secrets, personal data, bearer credentials, or internal configuration in metadata.
+The SDK limits an identifier to 128 bytes, each result to 4,096 instances, metadata to 16 keys and
+4 KiB total per instance, and each encoded response to 1 MiB.
 
-This page records source and package documentation, not an independent security audit. Validate the package, its provider SDKs, and its deployment configuration before production use.
+## Failure handling
+
+Provider errors are mapped to generic gRPC `Internal` status without forwarding provider text.
+Invalid client input is returned as `InvalidArgument`; oversized results use `ResourceExhausted`;
+malformed server responses use `DataLoss`. Log safe status codes and correlation data, not raw
+resolver errors or sensitive endpoint metadata.
+
+The package does not manage credentials or provider resources. Follow the repository
+[vulnerability disclosure policy](../../SECURITY.md) for security reports.
